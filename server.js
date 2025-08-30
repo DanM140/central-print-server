@@ -1,35 +1,58 @@
 // server.js
-const express = require('express');
-const { execSync } = require('child_process');
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const cors = require("cors");
+
 const app = express();
-const port = 3000;
+app.use(cors());
+app.use(express.json());
 
-// Function to get latest commit hash
-function getLatestCommit() {
-  try {
-    return execSync('git log -1 --oneline').toString().trim();
-  } catch (err) {
-    return 'N/A';
+// HTTP server
+const server = http.createServer(app);
+
+// WebSocket server
+const io = new Server(server, {
+  cors: {
+    origin: "*", // later restrict to your SaaS domain
+    methods: ["GET", "POST"]
   }
-}
-
-// Function to get deployment timestamp
-function getDeployTime() {
-  return new Date().toISOString();
-}
-
-app.get('/', (req, res) => {
-  const commit = getLatestCommit();
-  const timestamp = getDeployTime();
-
-  res.send(`
-    <h1>Central Print Server</h1>
-    <p>✅ Server is running!</p>
-    <p>Latest commit: <strong>${commit}</strong></p>
-    <p>Deployed at: <strong>${timestamp}</strong></p>
-  `);
 });
 
-app.listen(port, () => {
-  console.log(`Central Print Server running at http://localhost:${port}`);
+// Store connected printers
+let printers = {};
+
+// When a POS agent (local computer) connects
+io.on("connection", (socket) => {
+  console.log("New agent connected:", socket.id);
+
+  // Agent registers printer
+  socket.on("register_printer", (printerName) => {
+    printers[socket.id] = printerName;
+    console.log(`Printer registered: ${printerName} (${socket.id})`);
+  });
+
+  // Receive print job from SaaS
+  socket.on("print_job", (data) => {
+    console.log("Print job received:", data);
+    // Forward to the agent
+    socket.to(socket.id).emit("execute_print", data);
+  });
+
+  // Handle disconnection
+  socket.on("disconnect", () => {
+    console.log("Agent disconnected:", printers[socket.id]);
+    delete printers[socket.id];
+  });
+});
+
+// API to check available printers
+app.get("/printers", (req, res) => {
+  res.json(Object.values(printers));
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Central Print Server running on port ${PORT}`);
 });
