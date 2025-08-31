@@ -80,7 +80,29 @@ io.on("connection", (socket) => {
 app.get("/agents", (req, res) => {
   res.json(agents);
 });
+// Laravel will hit this endpoint
+app.post("/print", (req, res) => {
+  const { branch_id, content } = req.body;
 
+  const branchAgents = agents[branch_id];
+  if (!branchAgents) {
+    return res.status(404).json({ error: "No agents available for this branch" });
+  }
+
+  // Pick the first agent in the branch (or implement round-robin later)
+  const agentId = Object.keys(branchAgents)[0];
+  const agent = branchAgents[agentId];
+
+  if (!agent) {
+    return res.status(404).json({ error: "No agent found in this branch" });
+  }
+
+  // Send print job
+  io.to(agent.socketId).emit("execute_print", { content });
+  console.log(`Print job sent to Branch ${branch_id} - ${agentId}:`, content);
+
+  res.json({ status: "queued", agentId });
+});
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Central Print Server running on port ${PORT}`);
