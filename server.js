@@ -1,4 +1,4 @@
-// server.js
+// server.js 
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -14,44 +14,61 @@ const server = http.createServer(app);
 // WebSocket server
 const io = new Server(server, {
   cors: {
-    origin: "*", // later restrict to your SaaS domain
+    origin: "*", // restrict later to your SaaS domain
     methods: ["GET", "POST"]
   }
 });
 
-// Store connected printers
-let printers = {};
+// Store connected agents and active user sessions
+let agents = {};        // agentId -> socket.id
+let userSessions = {};  // userId -> agentId
 
-// When a POS agent (local computer) connects
 io.on("connection", (socket) => {
-  console.log("New agent connected:", socket.id);
+  console.log("New connection:", socket.id);
 
-  // Agent registers printer
-  socket.on("register_printer", (printerName) => {
-    printers[socket.id] = printerName;
-    console.log(`Printer registered: ${printerName} (${socket.id})`);
+  // Agent registers itself
+  socket.on("register_agent", ({ agentId, printerName }) => {
+    agents[agentId] = { socketId: socket.id, printerName };
+    console.log(`Agent registered: ${agentId}, printer: ${printerName}`);
   });
 
-  // Receive print job from SaaS
-  socket.on("print_job", (data) => {
-    console.log("Print job received:", data);
-    // Forward to the agent
-    socket.to(socket.id).emit("execute_print", data);
+  // Website binds logged-in user to agent
+  socket.on("bind_user", ({ userId, agentId }) => {
+    userSessions[userId] = agentId;
+    console.log(`User ${userId} bound to agent ${agentId}`);
+  });
+
+  // Website sends a print job
+  socket.on("print_job", ({ userId, payload }) => {
+    const agentId = userSessions[userId];
+    const agent = agents[agentId];
+
+    if (agent) {
+      io.to(agent.socketId).emit("execute_print", payload);
+      console.log(`Print job sent to ${agentId}:`, payload);
+    } else {
+      console.log(`No agent found for user ${userId}`);
+    }
   });
 
   // Handle disconnection
   socket.on("disconnect", () => {
-    console.log("Agent disconnected:", printers[socket.id]);
-    delete printers[socket.id];
+    console.log("Socket disconnected:", socket.id);
+    // Clean up agent records
+    for (const [agentId, info] of Object.entries(agents)) {
+      if (info.socketId === socket.id) {
+        console.log(`Agent disconnected: ${agentId}`);
+        delete agents[agentId];
+      }
+    }
   });
 });
 
-// API to check available printers
-app.get("/printers", (req, res) => {
-  res.json(Object.values(printers));
+// API to check available agents & printers
+app.get("/agents", (req, res) => {
+  res.json(agents);
 });
 
-// Start server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Central Print Server running on port ${PORT}`);
