@@ -19,63 +19,70 @@ const io = new Server(server, {
   },
 });
 
-// Store connected agents and active user sessions
-// agents[branchId][agentId] = { socketId, printerName, jobs: 0 }
+// agents[businessId][branchId][agentId] = { socketId, printerName, jobs: 0 }
 let agents = {};
-
-// userSessions[userId] = { branchId, agentId }
 let userSessions = {};
-
-// round-robin tracker per branch
 let branchRoundRobin = {};
 
 io.on("connection", (socket) => {
   console.log("New connection:", socket.id);
 
   // Agent registers itself
-  socket.on("register_agent", ({ agentId, branchId, printerName }) => {
-    if (!agents[branchId]) agents[branchId] = {};
-    agents[branchId][agentId] = {
+  socket.on("register_agent", ({ agentId, businessId, branchId, printerName }) => {
+    if (!businessId || !branchId) {
+      console.log("⚠️ Agent missing businessId or branchId");
+      return;
+    }
+
+    if (!agents[businessId]) agents[businessId] = {};
+    if (!agents[businessId][branchId]) agents[businessId][branchId] = {};
+
+    agents[businessId][branchId][agentId] = {
       socketId: socket.id,
       printerName,
       jobs: 0,
     };
 
     console.log(
-      `✅ Agent registered: Branch ${branchId} - ${agentId}, printer: ${printerName}`
+      `✅ Agent registered: Business ${businessId} / Branch ${branchId} - ${agentId}, printer: ${printerName}`
     );
   });
 
   // Website binds logged-in user to agent
-  socket.on("bind_user", ({ userId, branchId, agentId }) => {
-    userSessions[userId] = { branchId, agentId };
-    console.log(`👤 User ${userId} bound to agent ${agentId} in branch ${branchId}`);
+  socket.on("bind_user", ({ userId, businessId, branchId, agentId }) => {
+    userSessions[userId] = { businessId, branchId, agentId };
+    console.log(`👤 User ${userId} bound to agent ${agentId} in business ${businessId}, branch ${branchId}`);
   });
-// Handle branch updates
-socket.on("update_branch", ({ agentId, branchId }) => {
-  // remove from old branch
-  for (const [oldBranchId, branchAgents] of Object.entries(agents)) {
-    if (branchAgents[agentId]) {
-      const printerName = branchAgents[agentId].printerName;
-      delete branchAgents[agentId];
-      console.log(`🔄 Agent ${agentId} moved from branch ${oldBranchId} to ${branchId}`);
 
-      // re-add under new branch with same printer
-      if (!agents[branchId]) agents[branchId] = {};
-      agents[branchId][agentId] = { socketId: socket.id, printerName };
+  // Handle business + branch updates
+  socket.on("update_ids", ({ agentId, businessId, branchId }) => {
+    if (!businessId || !branchId) return;
 
-      return;
+    // Remove from any old business/branch
+    for (const [oldBizId, bizBranches] of Object.entries(agents)) {
+      for (const [oldBranchId, branchAgents] of Object.entries(bizBranches)) {
+        if (branchAgents[agentId]) {
+          const printerName = branchAgents[agentId].printerName;
+          delete branchAgents[agentId];
+          console.log(`🔄 Agent ${agentId} moved from ${oldBizId}/${oldBranchId} to ${businessId}/${branchId}`);
+
+          if (!agents[businessId]) agents[businessId] = {};
+          if (!agents[businessId][branchId]) agents[businessId][branchId] = {};
+          agents[businessId][branchId][agentId] = { socketId: socket.id, printerName };
+          return;
+        }
+      }
     }
-  }
 
-  // if agent wasn't registered yet, just add it fresh
-  if (!agents[branchId]) agents[branchId] = {};
-  agents[branchId][agentId] = { socketId: socket.id, printerName: "Unknown" };
+    // If not registered, just add fresh
+    if (!agents[businessId]) agents[businessId] = {};
+    if (!agents[businessId][branchId]) agents[businessId][branchId] = {};
+    agents[businessId][branchId][agentId] = { socketId: socket.id, printerName: "Unknown" };
 
-  console.log(`✅ Agent ${agentId} registered under branch ${branchId}`);
-});
+    console.log(`✅ Agent ${agentId} registered under ${businessId}/${branchId}`);
+  });
 
-  // Website sends a print job (via WebSocket)
+  // Website sends a print job
   socket.on("print_job", ({ userId, payload }) => {
     const session = userSessions[userId];
     if (!session) {
@@ -84,28 +91,25 @@ socket.on("update_branch", ({ agentId, branchId }) => {
       return;
     }
 
-    const { branchId, agentId } = session;
-    const agent = agents[branchId]?.[agentId];
+    const { businessId, branchId, agentId } = session;
+    const agent = agents[businessId]?.[branchId]?.[agentId];
 
     if (agent) {
       agent.jobs++;
-      io.to(agent.socketId).emit("execute_print", {
-        userId,
-        payload,
-      });
-      console.log(`🖨 Print job sent to Branch ${branchId} - ${agentId}:`, payload);
+      io.to(agent.socketId).emit("execute_print", { userId, payload });
+      console.log(`🖨 Print job sent to ${businessId}/${branchId}/${agentId}:`, payload);
     } else {
-      console.log(`⚠️ No agent found for user ${userId} in branch ${branchId}`);
+      console.log(`⚠️ No agent found for user ${userId} in ${businessId}/${branchId}`);
       socket.emit("print_error", { reason: "No agent available" });
     }
   });
 
-  // Agent confirms job status
+  // Job done
   socket.on("print_done", ({ userId }) => {
     console.log(`✅ Print done for user ${userId}`);
     const session = userSessions[userId];
     if (session) {
-      const agent = agents[session.branchId]?.[session.agentId];
+      const agent = agents[session.businessId]?.[session.branchId]?.[session.agentId];
       if (agent) agent.jobs = Math.max(0, agent.jobs - 1);
     }
     io.to(socket.id).emit("acknowledge", { status: "done", userId });
@@ -115,7 +119,7 @@ socket.on("update_branch", ({ agentId, branchId }) => {
     console.log(`❌ Print error for user ${userId}: ${error}`);
     const session = userSessions[userId];
     if (session) {
-      const agent = agents[session.branchId]?.[session.agentId];
+      const agent = agents[session.businessId]?.[session.branchId]?.[session.agentId];
       if (agent) agent.jobs = Math.max(0, agent.jobs - 1);
     }
     io.to(socket.id).emit("acknowledge", { status: "error", userId, error });
@@ -125,49 +129,48 @@ socket.on("update_branch", ({ agentId, branchId }) => {
   socket.on("disconnect", () => {
     console.log("🔌 Socket disconnected:", socket.id);
 
-    for (const [branchId, branchAgents] of Object.entries(agents)) {
-      for (const [agentId, info] of Object.entries(branchAgents)) {
-        if (info.socketId === socket.id) {
-          console.log(`⚠️ Agent disconnected: Branch ${branchId} - ${agentId}`);
-          delete agents[branchId][agentId];
+    for (const [bizId, bizBranches] of Object.entries(agents)) {
+      for (const [branchId, branchAgents] of Object.entries(bizBranches)) {
+        for (const [agentId, info] of Object.entries(branchAgents)) {
+          if (info.socketId === socket.id) {
+            console.log(`⚠️ Agent disconnected: ${bizId}/${branchId}/${agentId}`);
+            delete agents[bizId][branchId][agentId];
+          }
         }
       }
     }
   });
 });
 
-// API to check available agents & printers
+// API to check agents
 app.get("/agents", (req, res) => {
   res.json(agents);
 });
 
 // Laravel will hit this endpoint
 app.post("/print", (req, res) => {
-  const { branch_id, content, user_id } = req.body;
+  const { business_id, branch_id, content, user_id } = req.body;
 
-  const branchAgents = agents[branch_id];
+  const branchAgents = agents[business_id]?.[branch_id];
   if (!branchAgents || Object.keys(branchAgents).length === 0) {
     return res.status(404).json({ error: "No agents available for this branch" });
   }
 
-  // Implement round-robin selection
   const agentIds = Object.keys(branchAgents);
-  if (!branchRoundRobin[branch_id]) branchRoundRobin[branch_id] = 0;
+  const key = `${business_id}-${branch_id}`;
+  if (!branchRoundRobin[key]) branchRoundRobin[key] = 0;
 
-  const agentId = agentIds[branchRoundRobin[branch_id] % agentIds.length];
-  branchRoundRobin[branch_id]++;
+  const agentId = agentIds[branchRoundRobin[key] % agentIds.length];
+  branchRoundRobin[key]++;
 
   const agent = branchAgents[agentId];
   if (!agent) {
     return res.status(404).json({ error: "Agent not found" });
   }
 
-  // Increment job count
   agent.jobs++;
-
-  // Send print job
   io.to(agent.socketId).emit("execute_print", { content, userId: user_id });
-  console.log(`🖨 Print job sent (API) to Branch ${branch_id} - ${agentId}:`, content);
+  console.log(`🖨 Print job sent (API) to ${business_id}/${branch_id}/${agentId}:`, content);
 
   res.json({ status: "queued", agentId });
 });
