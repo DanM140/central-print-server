@@ -51,6 +51,29 @@ io.on("connection", (socket) => {
     userSessions[userId] = { branchId, agentId };
     console.log(`👤 User ${userId} bound to agent ${agentId} in branch ${branchId}`);
   });
+// Handle branch updates
+socket.on("update_branch", ({ agentId, branchId }) => {
+  // remove from old branch
+  for (const [oldBranchId, branchAgents] of Object.entries(agents)) {
+    if (branchAgents[agentId]) {
+      const printerName = branchAgents[agentId].printerName;
+      delete branchAgents[agentId];
+      console.log(`🔄 Agent ${agentId} moved from branch ${oldBranchId} to ${branchId}`);
+
+      // re-add under new branch with same printer
+      if (!agents[branchId]) agents[branchId] = {};
+      agents[branchId][agentId] = { socketId: socket.id, printerName };
+
+      return;
+    }
+  }
+
+  // if agent wasn't registered yet, just add it fresh
+  if (!agents[branchId]) agents[branchId] = {};
+  agents[branchId][agentId] = { socketId: socket.id, printerName: "Unknown" };
+
+  console.log(`✅ Agent ${agentId} registered under branch ${branchId}`);
+});
 
   // Website sends a print job (via WebSocket)
   socket.on("print_job", ({ userId, payload }) => {
